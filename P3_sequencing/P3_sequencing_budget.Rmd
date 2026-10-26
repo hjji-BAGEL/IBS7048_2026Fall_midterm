@@ -1,0 +1,11 @@
+---
+title: "IBS7048 Midterm Problem 3 - Sequencing budget"
+author: "hjji-BAGEL"
+date: "2026-10-25"
+output:
+  github_document:
+    html_preview: false
+---
+
+```{r budget, code = readLines("P3_sequencing_budget.R")}
+```

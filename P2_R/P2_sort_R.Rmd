@@ -1,0 +1,25 @@
+---
+title: "IBS7048 Midterm Problem 2 - Sorting FASTQ files with R"
+author: "hjji-BAGEL"
+date: "2026-10-25"
+output:
+  github_document:
+    html_preview: false
+---
+
+The dummy FASTQ files and the Bash result (`sorted_bash`) from Problem 1 must exist in
+`IBS7048_2026/` at the repository root before knitting this file.
+
+```{r setup, include = FALSE}
+# Run every chunk inside IBS7048_2026 (same folder as the Bash script)
+knitr::opts_knit$set(root.dir = normalizePath("../IBS7048_2026"))
+```
+
+```{r wd}
+basename(getwd())   # working directory is IBS7048_2026
+```
+
+## Sorting with R functions
+
+```{r sort, code = readLines("../P2_R/sort_fastq_R.R")}
+```

@@ -1,0 +1,310 @@
+---
+title: "IBS7048 Midterm Problem 4 - DADA2"
+author: "hjji-BAGEL"
+date: "2026-10-25"
+output:
+  github_document:
+    html_preview: false
+---
+
+```{r setup}
+# Load the packages used in class
+library(dada2)
+packageVersion("dada2")
+
+# Folder for all outputs of Problem 4 (filtered reads, figures, tables, tree)
+out_dir <- "P4_output"
+dir.create(out_dir, showWarnings = FALSE)
+```
+
+# 4a. ASV table from sam1 and sam2
+
+## Input files (given in the exam)
+
+```{r 4a-input}
+rawpath <- system.file("extdata", package = "dada2")
+fnFs <- file.path(rawpath, c("sam1F.fastq.gz", "sam2F.fastq.gz"))
+fnRs <- file.path(rawpath, c("sam1R.fastq.gz", "sam2R.fastq.gz"))
+sample.names <- c("sam1", "sam2")
+
+# Check that the four files exist
+file.exists(c(fnFs, fnRs))
+```
+
+## Quality profiles
+
+```{r 4a-quality, fig.width = 10, fig.height = 6}
+# Quality score along the read position for forward and reverse reads
+p_F <- plotQualityProfile(fnFs) + ggplot2::ggtitle("Forward reads")
+p_R <- plotQualityProfile(fnRs) + ggplot2::ggtitle("Reverse reads")
+p_F
+p_R
+
+# Save the plots as PNG files for the answer sheet
+ggplot2::ggsave(file.path(out_dir, "4a_quality_forward.png"), p_F, width = 8, height = 5, dpi = 300)
+ggplot2::ggsave(file.path(out_dir, "4a_quality_reverse.png"), p_R, width = 8, height = 5, dpi = 300)
+```
+
+## Filter and trim
+
+```{r 4a-filter}
+# Output paths for the filtered reads
+filtFs <- file.path(out_dir, "filtered", paste0(sample.names, "_F_filt.fastq.gz"))
+filtRs <- file.path(out_dir, "filtered", paste0(sample.names, "_R_filt.fastq.gz"))
+names(filtFs) <- sample.names
+names(filtRs) <- sample.names
+
+# Cut forward reads at 230 bp and reverse reads at 160 bp,
+# then discard reads with more than 2 expected errors (maxEE)
+# multithread = FALSE because multithreading does not work on Windows
+out <- filterAndTrim(fnFs, filtFs, fnRs, filtRs,
+                     truncLen = c(230, 160), maxEE = c(2, 2),
+                     compress = TRUE, multithread = FALSE)
+out
+```
+
+## Error model and denoising
+
+```{r 4a-dada}
+# Learn the error rates from the filtered reads
+errF <- learnErrors(filtFs, multithread = FALSE)
+errR <- learnErrors(filtRs, multithread = FALSE)
+
+# Check the fit of the error model (points = observed, line = fitted)
+plotErrors(errF, nominalQ = TRUE)
+
+# Infer the true sequences (ASVs) in each sample using the error model
+dadaFs <- dada(filtFs, err = errF, multithread = FALSE)
+dadaRs <- dada(filtRs, err = errR, multithread = FALSE)
+```
+
+## Merge, sequence table, chimera removal
+
+```{r 4a-merge}
+# Merge forward and reverse reads that overlap (default minOverlap = 12)
+mergers <- mergePairs(dadaFs, filtFs, dadaRs, filtRs, verbose = TRUE)
+
+# Sample x ASV count table
+seqtab <- makeSequenceTable(mergers)
+dim(seqtab)
+
+# Remove chimeras (sequences made of two more abundant parent sequences)
+seqtab.nochim <- removeBimeraDenovo(seqtab, method = "consensus",
+                                    multithread = FALSE, verbose = TRUE)
+dim(seqtab.nochim)
+```
+
+## Read tracking table
+
+```{r 4a-track}
+# Number of reads that remain after each step
+getN <- function(x) sum(getUniques(x))
+track <- cbind(out,
+               sapply(dadaFs, getN), sapply(dadaRs, getN),
+               sapply(mergers, getN), rowSums(seqtab.nochim))
+colnames(track) <- c("input", "filtered", "denoisedF", "denoisedR", "merged", "nonchim")
+rownames(track) <- sample.names
+track
+
+# Percentage of input reads that remain after each step
+round(100 * track / track[, "input"], 1)
+
+# Reads lost at each step (both samples combined)
+tot <- colSums(track)
+loss <- c(filtering = tot[["input"]] - tot[["filtered"]],
+          denoising = tot[["filtered"]] - tot[["denoisedF"]],
+          merging   = tot[["denoisedF"]] - tot[["merged"]],
+          chimera   = tot[["merged"]] - tot[["nonchim"]])
+loss
+round(100 * loss / tot[["input"]], 1)   # as % of all input reads
+
+# Answers for 4a
+n_ASV <- ncol(seqtab.nochim)                       # number of ASVs after chimera removal
+chimera_reads <- sum(seqtab) - sum(seqtab.nochim)  # reads removed as chimeras
+chimera_ASVs <- ncol(seqtab) - ncol(seqtab.nochim) # sequences flagged as chimeras
+c(ASVs = n_ASV, chimera_reads = chimera_reads, chimera_ASVs = chimera_ASVs)
+
+write.csv(track, file.path(out_dir, "4a_track_reads.csv"))
+```
+
+## Verification
+
+```{r 4a-verify}
+# 1) Reads never increase from one step to the next (denoisedR checked from filtered)
+all(track[, "input"] >= track[, "filtered"],
+    track[, "filtered"] >= track[, "denoisedF"],
+    track[, "filtered"] >= track[, "denoisedR"],
+    track[, "denoisedF"] >= track[, "merged"],
+    track[, "merged"] >= track[, "nonchim"])
+
+# 2) The last column of the table equals the final ASV table
+all(track[, "nonchim"] == rowSums(seqtab.nochim))
+
+# 3) Chimera reads = merged reads - non-chimeric reads
+chimera_reads == sum(track[, "merged"]) - sum(track[, "nonchim"])
+
+# 4) ASV lengths should be close to the expected amplicon length (252-253 bp)
+table(nchar(getSequences(seqtab.nochim)))
+```
+
+# 4b. truncLen = c(120,120)
+
+## Re-run with truncLen = c(120,120) and compare with 4a
+
+```{r 4b-rerun}
+# Same pipeline as 4a; only truncLen is changed to c(120, 120)
+filtFs_120 <- file.path(out_dir, "filtered_120", paste0(sample.names, "_F_filt.fastq.gz"))
+filtRs_120 <- file.path(out_dir, "filtered_120", paste0(sample.names, "_R_filt.fastq.gz"))
+names(filtFs_120) <- sample.names
+names(filtRs_120) <- sample.names
+
+out_120 <- filterAndTrim(fnFs, filtFs_120, fnRs, filtRs_120,
+                         truncLen = c(120, 120), maxEE = c(2, 2),
+                         compress = TRUE, multithread = FALSE)
+
+errF_120 <- learnErrors(filtFs_120, multithread = FALSE)
+errR_120 <- learnErrors(filtRs_120, multithread = FALSE)
+dadaFs_120 <- dada(filtFs_120, err = errF_120, multithread = FALSE)
+dadaRs_120 <- dada(filtRs_120, err = errR_120, multithread = FALSE)
+
+# Try to merge the 120 bp forward and reverse reads (same default minOverlap = 12)
+mergers_120 <- mergePairs(dadaFs_120, filtFs_120, dadaRs_120, filtRs_120, verbose = TRUE)
+
+# Side-by-side comparison of 4a and 4b (reads after filtering, denoising, merging)
+compare <- data.frame(
+  sample              = sample.names,
+  filtered_230_160    = out[, "reads.out"],
+  filtered_120_120    = out_120[, "reads.out"],
+  denoisedF_230_160   = sapply(dadaFs, getN),
+  denoisedF_120_120   = sapply(dadaFs_120, getN),
+  merged_230_160      = sapply(mergers, getN),
+  merged_120_120      = sapply(mergers_120, getN),
+  row.names           = NULL
+)
+compare
+write.csv(compare, file.path(out_dir, "4b_merge_comparison.csv"), row.names = FALSE)
+```
+
+## Verification: overlap length
+
+```{r 4b-verify}
+# Overlap = forward length + reverse length - amplicon length (252-253 bp)
+amplicon <- c(252, 253)
+overlap <- rbind("truncLen c(230,160)" = 230 + 160 - amplicon,
+                 "truncLen c(120,120)" = 120 + 120 - amplicon)
+colnames(overlap) <- paste0("amplicon_", amplicon, "bp")
+overlap
+
+# A merge needs at least minOverlap = 12 bp of overlap
+overlap >= 12
+
+# No reads were merged with truncLen = c(120,120)
+sum(sapply(mergers_120, getN)) == 0
+```
+
+# 4c. Phylogenetic tree of the top 5 ASVs
+
+## Select the top 5 ASVs and name them ASV1 to ASV5
+
+```{r 4c-top5}
+library(DECIPHER)
+library(phangorn)
+
+# Total reads of each ASV across both samples (after chimera removal)
+asv_counts <- colSums(seqtab.nochim)
+
+# Five ASVs with the highest total reads, in decreasing order of abundance
+top5_seqs   <- names(sort(asv_counts, decreasing = TRUE))[1:5]
+top5_counts <- asv_counts[top5_seqs]
+
+# Name them ASV1 to ASV5 (ASV1 = most abundant)
+top5 <- data.frame(ASV = paste0("ASV", 1:5),
+                   total_reads = as.vector(top5_counts),
+                   length_bp = nchar(top5_seqs),
+                   sequence = top5_seqs)
+top5[, c("ASV", "total_reads", "length_bp")]
+write.csv(top5, file.path(out_dir, "4c_top5_ASVs.csv"), row.names = FALSE)
+```
+
+## Alignment (DECIPHER) and trees (phangorn), following the lecture code
+
+```{r 4c-tree}
+# DNAStringSet with ASV names as sequence names
+seqs <- Biostrings::DNAStringSet(top5_seqs)
+names(seqs) <- top5$ASV
+
+# Multiple sequence alignment with DECIPHER (anchor = NA as in the lecture code)
+alignment <- AlignSeqs(seqs, anchor = NA, verbose = FALSE)
+alignment
+
+# Convert the alignment to a phangorn object
+phang_align <- phyDat(as(alignment, "matrix"), type = "DNA")
+
+# Pairwise distances (maximum likelihood distance) and neighbor-joining tree
+dm <- dist.ml(phang_align)
+round(as.matrix(dm), 4)
+tree_NJ <- NJ(dm)
+
+# Next step in the lecture code: refine the NJ tree with a maximum likelihood model
+# GTR substitution model + invariant sites (optInv) + gamma rate variation (optGamma)
+set.seed(2026)   # optim.pml with stochastic rearrangement uses random numbers
+fit <- pml(tree_NJ, data = phang_align)
+fit_GTR <- update(fit, k = 4, inv = 0.2)
+fit_GTR <- optim.pml(fit_GTR, model = "GTR", optInv = TRUE, optGamma = TRUE,
+                     rearrangement = "stochastic", control = pml.control(trace = 0))
+fit_GTR
+
+# Plot both trees with the read count of each ASV in the tip label
+# (both trees are unrooted; branch length = substitutions per site)
+plot_tree <- function(tr, title) {
+  tr$tip.label <- paste0(tr$tip.label, " (", top5$total_reads[match(tr$tip.label, top5$ASV)], " reads)")
+  depth <- max(node.depth.edgelength(tr))
+  plot(tr, type = "phylogram", cex = 0.9, label.offset = depth * 0.02,
+       x.lim = c(0, depth * 2.3), y.lim = c(0, Ntip(tr) + 0.5), main = title)
+  add.scale.bar(x = 0, y = 0.2)   # scale bar below the tips
+}
+draw_trees <- function() {
+  par(mfrow = c(1, 2), xpd = NA)
+  plot_tree(tree_NJ, "NJ tree (unrooted)")
+  plot_tree(fit_GTR$tree, "ML tree, GTR+G+I (unrooted)")
+  par(mfrow = c(1, 1))
+}
+draw_trees()
+
+# Save the figure as PNG for the answer sheet
+png(file.path(out_dir, "4c_trees.png"), width = 10, height = 4.5, units = "in", res = 300)
+draw_trees()
+invisible(dev.off())
+
+# Save the trees (Newick format, tip labels = ASV1 to ASV5)
+write.tree(tree_NJ, file = file.path(out_dir, "4c_top5_ASV_NJ.nwk"))
+write.tree(fit_GTR$tree, file = file.path(out_dir, "4c_top5_ASV_ML.nwk"))
+```
+
+## Verification
+
+```{r 4c-verify}
+# 1) ASV1 to ASV5 are in decreasing order of total reads
+!is.unsorted(rev(top5$total_reads))
+
+# 2) All aligned sequences have the same length
+length(unique(Biostrings::width(alignment))) == 1
+
+# 3) The saved Newick files can be read back with 5 tips named ASV1 to ASV5
+nj_back <- read.tree(file.path(out_dir, "4c_top5_ASV_NJ.nwk"))
+ml_back <- read.tree(file.path(out_dir, "4c_top5_ASV_ML.nwk"))
+c(NJ_tips = Ntip(nj_back), ML_tips = Ntip(ml_back))
+setequal(nj_back$tip.label, paste0("ASV", 1:5)) & setequal(ml_back$tip.label, paste0("ASV", 1:5))
+
+# 4) The trees are unrooted (no time direction without an outgroup)
+c(NJ_rooted = is.rooted(nj_back), ML_rooted = is.rooted(ml_back))
+
+# 5) The ML refinement did not make the fit worse than the starting NJ tree
+fit_GTR$logLik >= fit$logLik
+```
+
+# Session info
+
+```{r session}
+sessionInfo()
+```
